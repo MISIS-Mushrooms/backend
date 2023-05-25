@@ -21,9 +21,9 @@ if __name__ == '__main__':
     attend_users_train, attend_users_val = train_test_split(attend_users, test_size=0.1, random_state=0x1337)
     attend_users_train, attend_users_val = set(attend_users_train), set(attend_users_val)
     attends_train, attends_val = {k: v for k, v in attends.items() if k in attend_users_train}, {k: v for k, v in attends.items() if k in attend_users_val}
-    train_ds, val_ds = AttendanceDataset(attends_train, bank), AttendanceDataset(attends_val, bank)
+    train_ds, val_ds = AttendanceDataset(attends_train, bank, is_train=True), AttendanceDataset(attends_val, bank, is_train=False)
     trainer = XZTrainer(XZTrainerConfig(
-        experiment_name='baseline_wfree-sc',
+        experiment_name='baseline_wfree-sc-subsa',
         batch_size=8,
         batch_size_eval=8,
         epochs=10,

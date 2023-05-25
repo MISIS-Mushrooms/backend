@@ -1,3 +1,4 @@
+import random
 import re
 import warnings
 from typing import Tuple, Set, Dict, List, Optional
@@ -121,14 +122,20 @@ class GroupBank:
 
 
 class AttendanceDataset(Dataset):
-    def __init__(self, attend: Dict, bank: GroupBank):
+    def __init__(self, attend: Dict, bank: GroupBank, is_train: bool):
         self._bank = bank
         self._attend = attend
         self._attend_indices = [k for k in attend.keys()]
+        self._is_train = is_train
 
     def __getitem__(self, index):
         item = self._attend[self._attend_indices[index]]
         group_nums = self._bank.get_group_numbers(item['group_sequence'])
+        if self._is_train:
+            min_length = 1
+            group_start = random.randint(0, len(group_nums) - 1 - min_length)
+            group_end = group_start + random.randint(group_start + min_length, len(group_nums) - 1)
+            group_nums = group_nums[group_start:group_end + 1]
         group_nums = group_nums[::-1][:500][::-1]
         return {
             'group_sequence': torch.LongTensor(group_nums[:-1]),
