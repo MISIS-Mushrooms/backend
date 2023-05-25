@@ -1,7 +1,7 @@
 import random
 import re
 import warnings
-from typing import Tuple, Set, Dict, List, Optional
+from typing import Tuple, Set, Dict, List, Optional, FrozenSet
 
 import pandas as pd
 import torch
@@ -48,37 +48,39 @@ class GroupBank:
         self._action_id = self._generate_id_map(self._all_actions[0]), self._generate_id_map(self._all_actions[1]), self._generate_id_map(self._all_actions[2])
         self._area_id = self._generate_id_map(self._all_areas)
         self._block_id = self._generate_id_map(self._all_blocks)
-        self._group_to_num = {k: i for i, k in enumerate(self._df.index)}
+        group_by_cols = ['направление 1', 'направление 2', 'направление 3', 'округ площадки', 'район площадки']
+        self._macro_groups = {i: {'ids': set(x[1].index), 'features': {k: v for k, v in zip(group_by_cols, x[0])}} for i, x in enumerate(df.groupby(group_by_cols))}
+        self._group_to_macro_group = {idx: index for index, itms in self._macro_groups.items() for idx in itms['ids']}
 
     @staticmethod
     def _generate_id_map(s: Set[str]) -> Dict[str, int]:
         return {s: i for i, s in enumerate(s)}
 
     @staticmethod
-    def _cleanup_area(s: str) -> Set[str]:
+    def _cleanup_area(s: str) -> FrozenSet[str]:
         if pd.isna(s) or s.strip() == '':
-            return set()
+            return frozenset()
         s = _RE_ADM_AREA.sub(' ', s)
         s = s.replace(' и ', ' ')
         s = _RE_WORD.findall(s)
-        s = set(s)
+        s = frozenset(s)
         return s
 
     @staticmethod
-    def _cleanup_block(s: str) -> Set[str]:
+    def _cleanup_block(s: str) -> FrozenSet[str]:
         if pd.isna(s) or s.strip() == '':
-            return set()
-        return set(s.split(', '))
+            return frozenset()
+        return frozenset(s.split(', '))
 
-    def get_action_by_ids(self, group_id: List[str]) -> Tuple[List[str], List[str], List[str]]:
-        lst = list(list(x) for x in self._df.loc[group_id][['направление 1', 'направление 2', 'направление 3']].itertuples(index=False))
+    def get_action_by_ids(self, macro_group_id: List[int]) -> Tuple[List[str], List[str], List[str]]:
+        lst = [[self._macro_groups[mid]['features']['направление 1'], self._macro_groups[mid]['features']['направление 2'], self._macro_groups[mid]['features']['направление 3']] for mid in macro_group_id]
         return [x[0] for x in lst], [x[1] for x in lst], [x[2] for x in lst]
 
-    def get_area_by_ids(self, group_id: List[str]) -> List[Set[str]]:
-        return list(self._df.loc[group_id]['округ площадки'])
+    def get_area_by_ids(self, macro_group_id: List[int]) -> List[Set[str]]:
+        return [self._macro_groups[mid]['features']['округ площадки'] for mid in macro_group_id]
 
-    def get_block_by_ids(self, group_id: List[str]) -> List[Set[str]]:
-        return list(self._df.loc[group_id]['район площадки'])
+    def get_block_by_ids(self, macro_group_id: List[int]) -> List[Set[str]]:
+        return [self._macro_groups[mid]['features']['район площадки'] for mid in macro_group_id]
 
     def get_all_actions(self) -> Tuple[Set[str], Set[str], Set[str]]:
         return self._all_actions
@@ -86,21 +88,20 @@ class GroupBank:
     def get_all_areas(self) -> Set[str]:
         return self._all_areas
 
-    def get_all_ids(self) -> List[str]:
-        return list(self._df.index)
-
-    def group_num(self) -> int:
-        return len(self._df)
+    def macro_group_num(self) -> int:
+        return len(self._macro_groups)
 
     def get_all_blocks(self) -> Set[str]:
         return self._all_blocks
 
+    def get_macro_group_id(self, idx: str) -> int:
+        return self._group_to_macro_group[idx]
 
-    def get_model_data(self, group_ids: List[str]):
-        actions = self.get_action_by_ids(group_ids)
-        areas = self.get_area_by_ids(group_ids)
+    def get_model_data(self, macro_group_ids: List[int]):
+        actions = self.get_action_by_ids(macro_group_ids)
+        areas = self.get_area_by_ids(macro_group_ids)
         areas = [list(x) for x in areas]
-        blocks = self.get_block_by_ids(group_ids)
+        blocks = self.get_block_by_ids(macro_group_ids)
         blocks = [list(x) for x in blocks]
         max_area_len = max(map(len, areas))
         max_block_len = max(map(len, blocks))
@@ -118,26 +119,31 @@ class GroupBank:
             'block_mask': torch.LongTensor(block_mask)
         }
 
-    def get_group_numbers(self, groups: List[str]):
-        return [self._group_to_num[x] for x in groups]
+    @property
+    def num_macro_groups(self):
+        return len(self._macro_groups)
 
 
 class AttendanceDataset(Dataset):
-    def __init__(self, attend: Dict, bank: GroupBank, is_train: bool):
+    def __init__(self, attend: Dict, bank: GroupBank, is_train: bool, dummy: bool):
         self._bank = bank
         self._attend = attend
         self._attend_indices = [k for k in attend.keys()]
         self._is_train = is_train
+        self._dummy = dummy
 
     def __getitem__(self, index):
         item = self._attend[self._attend_indices[index]]
-        group_nums = self._bank.get_group_numbers(item['group_sequence'])
-        if self._is_train:
-            min_length = 1
-            group_start = random.randint(0, len(group_nums) - 1 - min_length)
-            group_end = group_start + random.randint(group_start + min_length, len(group_nums) - 1)
-            group_nums = group_nums[group_start:group_end + 1]
+        group_nums = item['group_sequence']
+        # if self._is_train:
+        #     min_length = 1
+        #     group_start = random.randint(0, len(group_nums) - min_length)
+        #     group_end = group_start + random.randint(group_start, len(group_nums) - 1)
+        #     group_nums = group_nums[group_start:group_end + 1]
         group_nums = group_nums[::-1][:500][::-1]
+        if self._dummy:
+            i = random.randint(0, self._bank.macro_group_num() - 1)
+            group_nums = [i for _ in range(random.randint(3, 40))]
         return {
             'group_sequence': torch.LongTensor(group_nums[:-1]),
             'group_sequence_out': torch.LongTensor(group_nums),
@@ -211,8 +217,8 @@ class AllVectorizer(nn.Module):
     def __init__(self, bank: GroupBank):
         super().__init__()
         self._group_vec = GroupVectorizer(bank)
-        self._all_group_index = nn.Parameter(torch.LongTensor(list(range(len(bank.get_all_ids())))), requires_grad=False)
-        self._all_group_data = nn.ParameterDict({k: nn.Parameter(v, requires_grad=False) for k, v in bank.get_model_data(bank.get_all_ids()).items()})
+        self._all_group_index = nn.Parameter(torch.LongTensor(list(range(bank.num_macro_groups))), requires_grad=False)
+        self._all_group_data = nn.ParameterDict({k: nn.Parameter(v, requires_grad=False) for k, v in bank.get_model_data(list(range(bank.num_macro_groups))).items()})
         self._cls = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
         self._sos = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
         nn.init.normal_(self._cls)
@@ -262,9 +268,9 @@ class MyTrainable(XZTrainable):
     def create_metrics(self, context_type: ContextType) -> Dict[str, Metric]:
         return {
             'loss': MeanMetric(),
-            'accuracy_top1': Accuracy('multiclass', num_classes=self._bank.group_num()),
-            'accuracy_top5': Accuracy('multiclass', num_classes=self._bank.group_num(), top_k=5),
-            'accuracy_top10': Accuracy('multiclass', num_classes=self._bank.group_num(), top_k=10)
+            'accuracy_top1': Accuracy('multiclass', num_classes=self._bank.macro_group_num()),
+            'accuracy_top5': Accuracy('multiclass', num_classes=self._bank.macro_group_num(), top_k=5),
+            'accuracy_top10': Accuracy('multiclass', num_classes=self._bank.macro_group_num(), top_k=10)
         }
 
     def update_metrics(self, context_type: ContextType, model_outputs: Dict[str, List], metrics: Dict[str, Metric]):
