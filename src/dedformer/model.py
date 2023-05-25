@@ -27,6 +27,40 @@ _RE_ADM_AREA = re.compile(r'административн\w+ округ\w*')
 _RE_WORD = re.compile(r'[\w-]+')
 
 
+class UserBank:
+    def __init__(self, users_path):
+        df = pd.read_csv(users_path, dtype={
+            'уникальный номер': str,
+            'дата создания личного дела': str,
+            'пол': str,
+            'дата рождения': str,
+            'адрес проживания': str
+        })
+        df['дата создание личного дела'] = df['дата создание личного дела'].apply(lambda x: dt.datetime.fromisoformat(x.strip().replace(' ', 'T')))
+        df['дата рождения'] = df['дата рождения'].apply(lambda x: dt.date.fromisoformat(x))
+        df = df.set_index('уникальный номер')
+        self._df = df
+
+    @property
+    def n_age_bins(self):
+        return 7
+
+    @property
+    def n_genders(self):
+        return 2
+
+    def to_model_data(self, idx: str):
+        sample = self._df.loc[idx]
+        age_years = ((sample['дата создание личного дела'].date() - sample['дата рождения']).days // 365)
+        age_bin = min(16, max(10, age_years // 5)) - 10
+        return {
+            'user_gender': torch.scalar_tensor(sample['пол'] == 'Женщина', dtype=torch.long),
+            'user_age_bin': torch.scalar_tensor(age_bin, dtype=torch.long),
+
+        }
+
+
+
 class GroupBank:
     def __init__(self, groups_path):
         df = pd.read_csv(groups_path, dtype={
@@ -51,6 +85,7 @@ class GroupBank:
         group_by_cols = ['направление 1', 'направление 2', 'направление 3', 'округ площадки', 'район площадки']
         self._macro_groups = {i: {'ids': set(x[1].index), 'features': {k: v for k, v in zip(group_by_cols, x[0])}} for i, x in enumerate(df.groupby(group_by_cols))}
         self._group_to_macro_group = {idx: index for index, itms in self._macro_groups.items() for idx in itms['ids']}
+        print(123)
 
     @staticmethod
     def _generate_id_map(s: Set[str]) -> Dict[str, int]:
@@ -125,15 +160,18 @@ class GroupBank:
 
 
 class AttendanceDataset(Dataset):
-    def __init__(self, attend: Dict, bank: GroupBank, is_train: bool, dummy: bool):
-        self._bank = bank
+    def __init__(self, attend: Dict, bank_group: GroupBank, bank_user: UserBank, is_train: bool, dummy: bool):
+        self._bank_group = bank_group
+        self._bank_user = bank_user
         self._attend = attend
         self._attend_indices = [k for k in attend.keys()]
         self._is_train = is_train
         self._dummy = dummy
 
     def __getitem__(self, index):
-        item = self._attend[self._attend_indices[index]]
+        user_id = self._attend_indices[index]
+        user_data = self._bank_user.to_model_data(user_id)
+        item = self._attend[user_id]
         group_nums = item['group_sequence']
         # if self._is_train:
         #     min_length = 1
@@ -142,14 +180,15 @@ class AttendanceDataset(Dataset):
         #     group_nums = group_nums[group_start:group_end + 1]
         group_nums = group_nums[::-1][:500][::-1]
         if self._dummy:
-            i = random.randint(0, self._bank.macro_group_num() - 1)
+            i = random.randint(0, self._bank_group.macro_group_num() - 1)
             group_nums = [i for _ in range(random.randint(3, 40))]
         return {
             'group_sequence': torch.LongTensor(group_nums[:-1]),
             'group_sequence_out': torch.LongTensor(group_nums),
             'group_target': torch.scalar_tensor(group_nums[-1], dtype=torch.long),
             'group_pos': torch.LongTensor(list(range(len(group_nums)))[::-1]),
-            'group_mask': torch.LongTensor([1 for _ in range(len(group_nums))])
+            'group_mask': torch.LongTensor([1 for _ in range(len(group_nums))]),
+            **user_data
         }
 
     def __len__(self):
@@ -167,10 +206,30 @@ class AttendanceCollator():
             'group_pos': torch.stack([F.pad(x['group_pos'], (0, max_group_sequence_ln - len(x['group_pos']))) for x in batch]),
             'group_mask': torch.stack([F.pad(x['group_mask'], (0, max_group_mask_ln - len(x['group_mask']))) for x in batch]),
             'group_sequence_out': torch.stack([F.pad(x['group_sequence_out'], (0, max_group_sequence_ln_out - len(x['group_sequence_out']))) for x in batch]),
+            'user_gender': torch.stack([x['user_gender'] for x in batch]),
+            'user_age_bin': torch.stack([x['user_age_bin'] for x in batch])
         }
 
 
 EMBED_DIM = 256
+
+
+class UserVectorizer(nn.Module):
+    def __init__(self, bank: UserBank):
+        super().__init__()
+
+        self._cls = nn.Parameter(torch.empty([1, EMBED_DIM]))
+        nn.init.normal_(self._cls)
+
+        self._gender_emb = nn.Embedding(bank.n_genders, EMBED_DIM)
+        self._age_emb = nn.Embedding(bank.n_age_bins, EMBED_DIM)
+
+    def forward(self, data):
+        gender_emb = self._gender_emb(data['user_gender'])
+        age_emb = self._age_emb(data['user_age_bin'])
+        cls_emb = self._cls.repeat(gender_emb.shape[0], 1)
+        all_emb = torch.stack([cls_emb, gender_emb, age_emb], dim=1)
+        return all_emb, torch.ones([all_emb.shape[0], all_emb.shape[1]], device=all_emb.device, dtype=torch.long)
 
 
 class GroupVectorizer(nn.Module):
@@ -214,14 +273,13 @@ def get_extended_attention_mask(
 
 
 class AllVectorizer(nn.Module):
-    def __init__(self, bank: GroupBank):
+    def __init__(self, bank: GroupBank, bank_users: UserBank):
         super().__init__()
         self._group_vec = GroupVectorizer(bank)
+        self._user_vec = UserVectorizer(bank_users)
         self._all_group_index = nn.Parameter(torch.LongTensor(list(range(bank.num_macro_groups))), requires_grad=False)
         self._all_group_data = nn.ParameterDict({k: nn.Parameter(v, requires_grad=False) for k, v in bank.get_model_data(list(range(bank.num_macro_groups))).items()})
-        self._cls = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
         self._sos = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
-        nn.init.normal_(self._cls)
         nn.init.normal_(self._sos)
         self._pos_enc = nn.Embedding(512, EMBED_DIM)
         cfg = T5Config(
@@ -238,16 +296,20 @@ class AllVectorizer(nn.Module):
         self._loss = ArcFace()
         # self._loss = TripletMarginLoss(distance=CosineSimilarity())
 
-    def forward(self, group_seq, group_pos, group_mask, group_target, group_seq_out):
+    def forward(self, data):
+        group_seq = data['group_sequence']
+        group_pos = data['group_pos']
+        group_mask = data['group_mask']
+        group_target = data['group_target']
+        group_seq_out = data['group_sequence_out']
         all_group_vec = self._group_vec(self._all_group_data)
         x_dec = all_group_vec[group_seq]
         # pos_ids = torch.arange(curr_vec.shape[1] - 1, -1, -1)
         x_dec = x_dec + self._pos_enc(group_pos)
         x_dec = torch.cat([self._sos.repeat(x_dec.shape[0], 1, 1), x_dec], dim=1)
-        x_enc = self._cls.repeat(x_dec.shape[0], 1, 1)
-        enc_mask = torch.ones([x_enc.shape[0], 1], dtype=group_mask.dtype, device=group_mask.device)
+        enc_x, enc_mask = self._user_vec(data)
         # group_mask = get_extended_attention_mask(group_mask, dtype=x.dtype)
-        x = self._t5(input_embeds=x_enc, input_attention_mask=enc_mask, decoder_inputs_embeds=x_dec,
+        x = self._t5(input_embeds=enc_x, input_attention_mask=enc_mask, decoder_inputs_embeds=x_dec,
                      decoder_attention_mask=group_mask).logits
         loss, logits = self._loss(all_group_vec, x[group_mask == 1], group_seq_out[group_mask == 1])
         return loss, logits[group_mask.sum(dim=1).cumsum(0) - 1]
@@ -258,7 +320,7 @@ class MyTrainable(XZTrainable):
         self._bank = bank
 
     def step(self, context: BaseContext, data: DataType) -> Tuple[Tensor, ModelOutputsType]:
-        loss, logits = context.model(data['group_sequence'], data['group_pos'], data['group_mask'], data['group_target'], data['group_sequence_out'])
+        loss, logits = context.model(data)
         return loss, {
             'loss': loss,
             'target': data['group_target'],

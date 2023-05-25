@@ -1,5 +1,6 @@
 import pickle
 
+import pandas as pd
 import torch
 from madgrad import MADGRAD
 from sklearn.model_selection import train_test_split
@@ -10,11 +11,12 @@ from xztrainer.logger.tensorboard import TensorboardLoggingEngineConfig
 from xztrainer.setup_helper import set_seeds, enable_tf32
 
 from dedformer.model import GroupBank, GroupVectorizer, AllVectorizer, AttendanceDataset, AttendanceCollator, \
-    MyTrainable
+    MyTrainable, UserBank
 
 if __name__ == '__main__':
     enable_tf32()
     set_seeds(0x1337)
+    users = UserBank('data/users.csv')
     bank = GroupBank('data/groups.csv')
     with open('data/attendance.pkl', 'rb') as f:
         attends = pickle.load(f)
@@ -22,9 +24,9 @@ if __name__ == '__main__':
     attend_users_train, attend_users_val = train_test_split(attend_users, test_size=0.1, random_state=0x1337)
     attend_users_train, attend_users_val = set(attend_users_train), set(attend_users_val)
     attends_train, attends_val = {k: v for k, v in attends.items() if k in attend_users_train}, {k: v for k, v in attends.items() if k in attend_users_val}
-    train_ds, val_ds = AttendanceDataset(attends_train, bank, is_train=True, dummy=False), AttendanceDataset(attends_val, bank, is_train=False, dummy=False)
+    train_ds, val_ds = AttendanceDataset(attends_train, bank, users, is_train=True, dummy=False), AttendanceDataset(attends_val, bank, users, is_train=False, dummy=False)
     trainer = XZTrainer(XZTrainerConfig(
-        experiment_name='t5-fix-4decoders-newmargin-32scae-0.05m-newg-2',
+        experiment_name='t5-users',
         batch_size=8,
         batch_size_eval=8,
         epochs=10,
@@ -39,5 +41,5 @@ if __name__ == '__main__':
         eval_steps=500,
         collate_fn=AttendanceCollator(),
         logger=TensorboardLoggingEngineConfig()
-    ), AllVectorizer(bank), MyTrainable(bank))
+    ), AllVectorizer(bank, users), MyTrainable(bank))
     trainer.train(train_ds, val_ds)
