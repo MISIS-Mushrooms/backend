@@ -23,7 +23,7 @@ if __name__ == '__main__':
     attends_train, attends_val = {k: v for k, v in attends.items() if k in attend_users_train}, {k: v for k, v in attends.items() if k in attend_users_val}
     train_ds, val_ds = AttendanceDataset(attends_train, bank), AttendanceDataset(attends_val, bank)
     trainer = XZTrainer(XZTrainerConfig(
-        experiment_name='baseline',
+        experiment_name='baseline_wfree-sc',
         batch_size=8,
         batch_size_eval=8,
         epochs=10,

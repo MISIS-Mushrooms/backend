@@ -217,8 +217,6 @@ class AllVectorizer(nn.Module):
 
     def forward(self, group_seq, group_pos, group_mask, group_target):
         all_group_vec = self._group_vec(self._all_group_data)
-        self._loss.W = all_group_vec.T
-        self._loss.num_classes = all_group_vec.shape[0]
         x = all_group_vec[group_seq]
         # pos_ids = torch.arange(curr_vec.shape[1] - 1, -1, -1)
         x = x + self._pos_enc(group_pos)
@@ -227,8 +225,8 @@ class AllVectorizer(nn.Module):
         group_mask = get_extended_attention_mask(group_mask, dtype=x.dtype)
         x = self._encoder(x, attention_mask=group_mask)
         x = self._pool(x.last_hidden_state)
-        loss = self._loss(x, group_target)
-        return loss, self._loss.get_logits(x)
+        loss, logits = self._loss(all_group_vec, x, group_target)
+        return loss, logits
 
 
 class MyTrainable(XZTrainable):
