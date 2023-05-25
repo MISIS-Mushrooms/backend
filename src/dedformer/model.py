@@ -15,12 +15,13 @@ import datetime as dt
 from torchmetrics import Metric, MeanMetric, Accuracy
 from torchmetrics.functional import pairwise_cosine_similarity
 from tqdm import tqdm
-from transformers import RobertaConfig
+from transformers import RobertaConfig, T5Config
 from transformers.modeling_utils import ModuleUtilsMixin
 from transformers.models.roberta.modeling_roberta import RobertaEncoder, RobertaPooler
 from xztrainer import XZTrainable, ContextType, BaseContext, DataType, ModelOutputsType
 
 from dedformer.arcface import ArcFace
+from dedformer.t5 import T5ForConditionalGeneration
 
 _RE_ADM_AREA = re.compile(r'административн\w+ округ\w*')
 _RE_WORD = re.compile(r'[\w-]+')
@@ -139,6 +140,7 @@ class AttendanceDataset(Dataset):
         group_nums = group_nums[::-1][:500][::-1]
         return {
             'group_sequence': torch.LongTensor(group_nums[:-1]),
+            'group_sequence_out': torch.LongTensor(group_nums),
             'group_target': torch.scalar_tensor(group_nums[-1], dtype=torch.long),
             'group_pos': torch.LongTensor(list(range(len(group_nums)))[::-1]),
             'group_mask': torch.LongTensor([1 for _ in range(len(group_nums))])
@@ -150,12 +152,15 @@ class AttendanceDataset(Dataset):
 
 class AttendanceCollator():
     def __call__(self, batch):
+        max_group_mask_ln = max([len(x['group_mask']) for x in batch])
         max_group_sequence_ln = max([len(x['group_sequence']) for x in batch])
+        max_group_sequence_ln_out = max([len(x['group_sequence_out']) for x in batch])
         return {
             'group_sequence': torch.stack([F.pad(x['group_sequence'], (0, max_group_sequence_ln - len(x['group_sequence']))) for x in batch]),
             'group_target': torch.stack([x['group_target'] for x in batch]),
             'group_pos': torch.stack([F.pad(x['group_pos'], (0, max_group_sequence_ln - len(x['group_pos']))) for x in batch]),
-            'group_mask': torch.stack([F.pad(x['group_mask'], (0, max_group_sequence_ln - len(x['group_mask']))) for x in batch])
+            'group_mask': torch.stack([F.pad(x['group_mask'], (0, max_group_mask_ln - len(x['group_mask']))) for x in batch]),
+            'group_sequence_out': torch.stack([F.pad(x['group_sequence_out'], (0, max_group_sequence_ln_out - len(x['group_sequence_out']))) for x in batch]),
         }
 
 
@@ -209,31 +214,37 @@ class AllVectorizer(nn.Module):
         self._all_group_index = nn.Parameter(torch.LongTensor(list(range(len(bank.get_all_ids())))), requires_grad=False)
         self._all_group_data = nn.ParameterDict({k: nn.Parameter(v, requires_grad=False) for k, v in bank.get_model_data(bank.get_all_ids()).items()})
         self._cls = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
+        self._sos = nn.Parameter(torch.empty([1, 1, EMBED_DIM]))
         nn.init.normal_(self._cls)
+        nn.init.normal_(self._sos)
         self._pos_enc = nn.Embedding(512, EMBED_DIM)
-        cfg = RobertaConfig(
-            hidden_size=EMBED_DIM,
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            intermediate_size=EMBED_DIM * 4
+        cfg = T5Config(
+            d_model=EMBED_DIM,
+            d_kv=EMBED_DIM // 4,
+            num_heads=4,
+            d_ff=EMBED_DIM * 4,
+            num_layers=1,
+            num_decoder_layers=4,
+            intermediate_size=EMBED_DIM * 4,
+            tie_word_embeddings=False
         )
-        self._encoder = RobertaEncoder(cfg)
-        self._pool = RobertaPooler(cfg)
+        self._t5 = T5ForConditionalGeneration(cfg)
         self._loss = ArcFace()
         # self._loss = TripletMarginLoss(distance=CosineSimilarity())
 
-    def forward(self, group_seq, group_pos, group_mask, group_target):
+    def forward(self, group_seq, group_pos, group_mask, group_target, group_seq_out):
         all_group_vec = self._group_vec(self._all_group_data)
-        x = all_group_vec[group_seq]
+        x_dec = all_group_vec[group_seq]
         # pos_ids = torch.arange(curr_vec.shape[1] - 1, -1, -1)
-        x = x + self._pos_enc(group_pos)
-        x = torch.cat([self._cls.repeat(x.shape[0], 1, 1), x], dim=1)
-        group_mask = torch.cat([torch.ones([group_mask.shape[0], 1], dtype=group_mask.dtype, device=group_mask.device), group_mask], dim=1)
-        group_mask = get_extended_attention_mask(group_mask, dtype=x.dtype)
-        x = self._encoder(x, attention_mask=group_mask)
-        x = self._pool(x.last_hidden_state)
-        loss, logits = self._loss(all_group_vec, x, group_target)
-        return loss, logits
+        x_dec = x_dec + self._pos_enc(group_pos)
+        x_dec = torch.cat([self._sos.repeat(x_dec.shape[0], 1, 1), x_dec], dim=1)
+        x_enc = self._cls.repeat(x_dec.shape[0], 1, 1)
+        enc_mask = torch.ones([x_enc.shape[0], 1], dtype=group_mask.dtype, device=group_mask.device)
+        # group_mask = get_extended_attention_mask(group_mask, dtype=x.dtype)
+        x = self._t5(input_embeds=x_enc, input_attention_mask=enc_mask, decoder_inputs_embeds=x_dec,
+                     decoder_attention_mask=group_mask).logits
+        loss, logits = self._loss(all_group_vec, x[group_mask == 1], group_seq_out[group_mask == 1])
+        return loss, logits[group_mask.sum(dim=1).cumsum(0) - 1]
 
 
 class MyTrainable(XZTrainable):
@@ -241,7 +252,7 @@ class MyTrainable(XZTrainable):
         self._bank = bank
 
     def step(self, context: BaseContext, data: DataType) -> Tuple[Tensor, ModelOutputsType]:
-        loss, logits = context.model(data['group_sequence'], data['group_pos'], data['group_mask'], data['group_target'])
+        loss, logits = context.model(data['group_sequence'], data['group_pos'], data['group_mask'], data['group_target'], data['group_sequence_out'])
         return loss, {
             'loss': loss,
             'target': data['group_target'],
