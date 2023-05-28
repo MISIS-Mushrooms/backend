@@ -1,0 +1,13 @@
+data/checkpoint.pt filter=lfs diff=lfs merge=lfs -text
+data/dict.xlsx filter=lfs diff=lfs merge=lfs -text
+data/geocoord_persons.txt filter=lfs diff=lfs merge=lfs -text
+data/test.csv filter=lfs diff=lfs merge=lfs -text
+data/users.csv filter=lfs diff=lfs merge=lfs -text
+data/attendance.pkl filter=lfs diff=lfs merge=lfs -text
+data/attend.csv filter=lfs diff=lfs merge=lfs -text
+data/bornstat.csv filter=lfs diff=lfs merge=lfs -text
+data/groups.csv filter=lfs diff=lfs merge=lfs -text
+data/user_names.csv filter=lfs diff=lfs merge=lfs -text
+data/babybooms.csv filter=lfs diff=lfs merge=lfs -text
+data/deathcause filter=lfs diff=lfs merge=lfs -text
+data/geocoord_groups.txt filter=lfs diff=lfs merge=lfs -text
