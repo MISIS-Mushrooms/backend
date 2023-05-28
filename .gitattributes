@@ -11,3 +11,5 @@ data/user_names.csv filter=lfs diff=lfs merge=lfs -text
 data/babybooms.csv filter=lfs diff=lfs merge=lfs -text
 data/deathcause filter=lfs diff=lfs merge=lfs -text
 data/geocoord_groups.txt filter=lfs diff=lfs merge=lfs -text
+data/infer_ids.csv filter=lfs diff=lfs merge=lfs -text
+data/infer_users.csv filter=lfs diff=lfs merge=lfs -text

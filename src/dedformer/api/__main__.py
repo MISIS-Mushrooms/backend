@@ -1,3 +1,5 @@
+import os
+
 import uvicorn
 
 if __name__ == '__main__':
@@ -5,7 +7,7 @@ if __name__ == '__main__':
         "dedformer.api.app:create_app",
         factory=True,
         host='0.0.0.0',
-        port=7088,
+        port=int(os.getenv('UV_PORT', '7088')),
         workers=1,
         # log_config=,
     )

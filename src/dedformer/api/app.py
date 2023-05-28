@@ -128,7 +128,7 @@ def create_app():
     app = FastAPI()
     checkpoint_file = 'data/checkpoint.pt'
     print(f'LOADING CHECKPOINT {checkpoint_file}')
-    state = torch.load(checkpoint_file)
+    state = torch.load(checkpoint_file, map_location=torch.device('cpu'))
     ml_model = AllVectorizer(group_bank, user_bank).eval()
     print(ml_model.load_state_dict(state['model']))
     col = AttendanceCollator()
