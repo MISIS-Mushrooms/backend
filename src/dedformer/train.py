@@ -26,13 +26,13 @@ if __name__ == '__main__':
     attends_train, attends_val = {k: v for k, v in attends.items() if k in attend_users_train}, {k: v for k, v in attends.items() if k in attend_users_val}
     train_ds, val_ds = AttendanceDataset(attends_train, bank, users, is_train=True, dummy=False), AttendanceDataset(attends_val, bank, users, is_train=False, dummy=False)
     trainer = XZTrainer(XZTrainerConfig(
-        experiment_name='t5-users-onlinevec-posfix-last-aug-lizafts-fix2',
+        experiment_name='t5-users-onlinevec-posfix-last-aug-lizafts-fix2-100eps',
         batch_size=8,
         batch_size_eval=8,
-        epochs=10,
+        epochs=100,
         save_keep_n=3,
         optimizer=lambda mdl: MADGRAD(mdl.parameters(), lr=5e-4, weight_decay=0),
-        scheduler=lambda opt, total_steps: get_linear_schedule_with_warmup(opt, int(total_steps * 0.2), total_steps),
+        scheduler=lambda opt, total_steps: get_linear_schedule_with_warmup(opt, int(total_steps * 0.05), total_steps),
         scheduler_type=SchedulerType.STEP,
         dataloader_num_workers=8,
         accumulation_batches=4,

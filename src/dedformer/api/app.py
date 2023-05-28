@@ -3,6 +3,7 @@ import random
 from collections import defaultdict
 from typing import Optional, List, Literal, Set
 
+import geopy.distance
 import pandas as pd
 import torch
 from fastapi import FastAPI
@@ -35,11 +36,13 @@ class RecommendCategories(BaseModel):
 
 
 class RecommendFilters(BaseModel):
+    query: str = Field()
     health_problems: bool = Field(alias='healthProblems')
     prefer_online: bool = Field(alias='preferOnline')
     with_grandson: bool = Field(alias='withGrandson')
     categories: RecommendCategories
     areas: Set[str]
+    friend_ids: Set[str] = Field(alias='friendIds')
 
 
 class RecommendOnboarding(BaseModel):
@@ -77,6 +80,7 @@ class RecommendTimetable(BaseModel):
 class RecommendVariant(BaseModel):
     id: str
     area: List[str]
+    distance: float
     timetable: RecommendTimetable
 
 
@@ -122,7 +126,7 @@ def create_app():
         attendance = pickle.load(f)
     feature_creator = FeatureCreator(attendance, group_bank, user_bank)
     app = FastAPI()
-    checkpoint_file = 'checkpoint/t5-users-onlinevec-posfix-last-aug-lizafts-fix2/save-14320.pt'
+    checkpoint_file = 'data/checkpoint.pt'
     print(f'LOADING CHECKPOINT {checkpoint_file}')
     state = torch.load(checkpoint_file)
     ml_model = AllVectorizer(group_bank, user_bank).eval()
@@ -154,25 +158,32 @@ def create_app():
     threecat_area_mask = {block: torch.BoolTensor([
         block in x for x in all_blocks
     ]) for block in all_block_set}
+    all_search_str = [' '.join(x.strip() for x in zippd).lower() for zippd in zip(*all_actions, all_descriptions)]
     today_timetables = {k: group_bank.get_timetable(k, dt.date(2023, 4, 10)) for k in group_bank.get_all_group_ids()}
     print(123)
 
     @app.post('/recommend')
     async def recommend(inputs: RecommendInputs) -> RecommendOutputs:
+        user_geo = user_bank.get_geo(inputs.user_id)
+        user_demo_mode = user_geo is None
+        if user_geo is None:
+            user_geo = (55.7385557, 37.6183149)  # третьяковка в центре москвы
         if inputs.user_id in user_bank.get_all_user_ids():
-            features = col([feature_creator.get_features(inputs.user_id, return_target=False, target_stop_random=False)])
+            features = col([feature_creator.get_features(x, return_target=False, target_stop_random=False) for x in [inputs.user_id, *inputs.filters.friend_ids]])
             with torch.inference_mode():
-                ml_similarity = (ml_model(features)[0] + 1) / 2
+                ml_similarity = (ml_model(features, mean_vec_along_batch=True)[0] + 1) / 2
             ml_similarity = ml_similarity.clone()
         else:
-            ml_similarity = torch.FloatTensor([random.uniform(0.48, 0.54) for _ in range(group_bank.num_macro_groups)])
+            user_rng = random.Random(x=inputs.user_id)
+            ml_similarity = torch.FloatTensor([user_rng.uniform(0.48, 0.54) for _ in range(group_bank.num_macro_groups)])
 
         for cat in inputs.onboarding.categories:
             ml_similarity[torch.BoolTensor([x == cat for x in all_actions[0]])] *= 1.5
 
-        # trim online
-
-
+        q = inputs.filters.query.strip().lower()
+        if q != '':
+            search_mask = torch.BoolTensor([q in x for x in all_search_str])
+            ml_similarity[~search_mask] = 0
         if inputs.filters.health_problems:
             ml_similarity[health_mask] = 0
         if inputs.filters.prefer_online:
@@ -210,8 +221,11 @@ def create_app():
             group_small = False
             group_new = False
             groups_with_timetables = {k: RecommendTimetable.parse_obj(today_timetables[k]) for k in group_bank.get_group(macro_group_index) if today_timetables[k] is not None}
-            variants = [RecommendVariant(id=idx, timetable=tt, area=list(group_blocks)) for idx, tt in groups_with_timetables.items()]
-            variants = sorted(variants, key=lambda x: (x.timetable.mon, x.timetable.tue, x.timetable.wed, x.timetable.thu, x.timetable.fri, x.timetable.sat, x.timetable.sun))
+            groups_distances = {k: (geopy.distance.distance(user_geo, group_bank.get_geocoord(k)).meters if (user_geo is not None and not group_online) else 0) for k in groups_with_timetables.keys()}
+            variants = [RecommendVariant(id=idx, timetable=tt, area=list(group_blocks), distance=groups_distances[idx]) for idx, tt in groups_with_timetables.items()]
+            variants = sorted(variants, key=lambda x: (x.distance, x.timetable.mon, x.timetable.tue, x.timetable.wed, x.timetable.thu, x.timetable.fri, x.timetable.sat, x.timetable.sun))
+            if len(variants) == 0:
+                continue
             if group_actions not in mega_items:
                 mega_items[group_actions] = {
                     'id': str(hash(group_actions)),
@@ -223,6 +237,11 @@ def create_app():
                                           online=group_online)
                 }
             mega_group_variants[group_actions].extend(variants)
+
+        if user_demo_mode:
+            for k in mega_group_variants:
+                mega_group_variants[k] = sorted(mega_group_variants[k], key=lambda x: (x.distance, x.timetable.mon, x.timetable.tue, x.timetable.wed, x.timetable.thu, x.timetable.fri,x.timetable.sat, x.timetable.sun))
+
 
 
         return RecommendOutputs(
