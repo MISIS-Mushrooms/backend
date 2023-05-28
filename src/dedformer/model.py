@@ -109,7 +109,6 @@ class UserBank:
             'user_born_mort': torch.Tensor(list(born_mort.values()))
         }
 
-
 _RE_TIMETABLE = re.compile(
     r'(?:[cс] (?P<date_from>\d{2}\.\d{2}\.\d{4}) по (?P<date_to>\d{2}\.\d{2}\.\d{4}), )?(?P<dow>[А-Яа-я., ]+) (?P<time_from>\d{2}:\d{2})-(?P<time_to>\d{2}:\d{2})')
 
@@ -235,7 +234,7 @@ class GroupBank:
     def get_geocoord(self, micro_id: str):
         return self._df.loc[micro_id]['geo']
 
-    def get_timetable(self, micro_id: str, date_at: dt.date):
+    def get_timetable(self, micro_id: str, date_at: Optional[dt.date]):
         def _days_dict():
             return {
                 'mon': 'нет',
@@ -257,7 +256,7 @@ class GroupBank:
             gd = m.groupdict()
             if gd['date_from'] is not None:
                 if date_from is not None:
-                    if date_from <= date_at <= date_to:
+                    if date_at is not None and date_from <= date_at <= date_to:
                         return days_dict
                 days_dict = _days_dict()
                 date_from = dt.datetime.strptime(gd['date_from'], '%d.%m.%Y').date()
@@ -266,7 +265,7 @@ class GroupBank:
                 if dow_orig in gd['dow']:
                     days_dict[dow_inm] = f'{gd["time_from"]}-{gd["time_to"]}'
         if date_from is not None:
-            if date_from <= date_at <= date_to:
+            if date_at is None or date_from <= date_at <= date_to:
                 return days_dict
         return None
 
@@ -305,8 +304,28 @@ class FeatureCreator():
         self._bank_user = bank_user
         self._attend = attend
 
+    def get_attend_times(self, user_id: str):
+        wd = {0: 'mon', 1: 'tue', 2: 'wed', 3: 'thu', 4: 'fri', 5: 'sat', 6: 'sun'}
+        if user_id not in self._attend:
+            print(f'no attendance for {user_id}')
+            return []
+        attends = self._attend[user_id]['dt'].sort_values(ascending=False)
+        if len(attends) > 0:
+            return [(wd[x.to_pydatetime().weekday()], x.to_pydatetime().time()) for x in attends[attends.between(attends.max() - dt.timedelta(days=45), attends.max())]]
+        else:
+            return []
+
     def get_features(self, user_id: str, return_target: bool, target_stop_random: bool):
         user_data = self._bank_user.to_model_data(user_id)
+        if user_id not in self._attend:
+            print(f'no attendance data for {user_id}')
+            return {
+                **user_data,
+                'group_sequence': torch.LongTensor(),
+                'group_popularity': torch.FloatTensor(),
+                'group_pos': torch.LongTensor(),
+                'group_mask': torch.LongTensor(),
+            }
         item = self._attend[user_id]
 
         visited = set()
