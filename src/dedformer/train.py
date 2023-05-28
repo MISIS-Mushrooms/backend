@@ -26,7 +26,7 @@ if __name__ == '__main__':
     attends_train, attends_val = {k: v for k, v in attends.items() if k in attend_users_train}, {k: v for k, v in attends.items() if k in attend_users_val}
     train_ds, val_ds = AttendanceDataset(attends_train, bank, users, is_train=True, dummy=False), AttendanceDataset(attends_val, bank, users, is_train=False, dummy=False)
     trainer = XZTrainer(XZTrainerConfig(
-        experiment_name='t5-users-popularity-groupaten',
+        experiment_name='t5-users-onlinevec-posfix-last-aug-lizafts-fix2',
         batch_size=8,
         batch_size_eval=8,
         epochs=10,

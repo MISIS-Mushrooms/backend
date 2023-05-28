@@ -23,6 +23,13 @@ jupyterlab = "^4.0.0"
 catboost = "^1.2"
 notebook = "^6.5.4"
 pandas = "^2.0.1"
+fastapi = "^0.95.2"
+uvicorn = "^0.22.0"
+faker = "^18.9.0"
+sympy = "^1.12"
+torchvision = {version = "^0.15.2+cu118", source = "torch-cu11.8"}
+selenium = "^4.9.1"
+openpyxl = "^3.1.2"
 
 
 [[tool.poetry.source]]
