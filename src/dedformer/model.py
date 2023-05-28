@@ -75,6 +75,15 @@ class UserBank:
     def n_age_bins(self):
         return 7
 
+    def get_somebody(self):
+        itm = self._df.sample().iloc[0]
+        return {
+            'first': itm['first'],
+            'last': itm['last'],
+            'middle': itm['middle'],
+            'birth': itm['дата рождения']
+        }
+
     @property
     def n_genders(self):
         return 2

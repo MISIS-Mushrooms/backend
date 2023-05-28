@@ -101,6 +101,20 @@ class RecommendOutputs(BaseModel):
         allow_population_by_field_name = True
 
 
+class SomebodyInputs(BaseModel):
+    pass
+
+
+class SomebodyOutputs(BaseModel):
+    first_name: str = Field(alias='firstName')
+    middle_name: Optional[str] = Field(alias='middleName')
+    last_name: str = Field(alias='lastName')
+    date_of_birth: dt.date = Field(alias='dateOfBirth')
+
+    class Config:
+        allow_population_by_field_name = True
+
+
 DROP_HEALTH_PROBLEMS = {'Физическая активность'}
 GRANDSON_CATEGORIES = {'ОНЛАЙН Рисование', 'ОНЛАЙН Английский язык', 'Иностранные языки', 'ОНЛАЙН Интеллектуальный клуб. Информационные технологии',
                        'Интеллектуальный клуб. Иностранные языки', 'ОНЛАЙН Пение', 'Настольные игры',
@@ -247,5 +261,10 @@ def create_app():
         return RecommendOutputs(
             items=[RecommendItem(variants=variants if inputs.return_variants else [], **mega_items[k]) for k, variants in mega_group_variants.items()][:50]
         )
+
+    @app.post('/somebody')
+    async def somebody(inputs: SomebodyInputs):
+        sb = user_bank.get_somebody()
+        return SomebodyOutputs(first_name=sb['first'], middle_name=sb['middle'], last_name=sb['last'], date_of_birth=sb['birth'])
 
     return app
