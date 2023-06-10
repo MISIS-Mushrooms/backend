@@ -105,6 +105,9 @@ class UserBank:
         else:
             return None
 
+    def get_user_identity_by_id(self, user_id: str):
+        return self._df.loc[user_id].to_dict()
+
     def to_model_data(self, idx: str):
         sample = self._df.loc[idx]
         age_years = ((sample['дата создание личного дела'].date() - sample['дата рождения']).days // 365)

@@ -1,7 +1,8 @@
 import pickle
 import random
+import traceback
 from collections import defaultdict
-from typing import Optional, List, Literal, Set
+from typing import Optional, List, Literal, Set, Dict
 
 import geopy.distance
 import pandas as pd
@@ -10,50 +11,9 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import datetime as dt
 
+from tqdm import tqdm
+
 from dedformer.model import UserBank, GroupBank, AllVectorizer, FeatureCreator, AttendanceCollator
-
-
-class IdentifyInputs(BaseModel):
-    first_name: str = Field(alias='firstName')
-    middle_name: Optional[str] = Field(alias='middleName')
-    last_name: str = Field(alias='lastName')
-    date_of_birth: dt.date = Field(alias='dateOfBirth')
-
-
-class IdentifyOutputs(BaseModel):
-    need_onboarding: bool = Field(alias='needOnboarding')
-    user_id: str = Field(alias='userId')
-    areas: List[str] = Field(alias='areas')
-
-    class Config:
-        allow_population_by_field_name = True
-
-
-class RecommendCategories(BaseModel):
-    soul: bool
-    mind: bool
-    body: bool
-
-
-class RecommendFilters(BaseModel):
-    query: str = Field()
-    health_problems: bool = Field(alias='healthProblems')
-    prefer_online: bool = Field(alias='preferOnline')
-    with_grandson: bool = Field(alias='withGrandson')
-    categories: RecommendCategories
-    areas: Set[str]
-    friend_ids: Set[str] = Field(alias='friendIds')
-
-
-class RecommendOnboarding(BaseModel):
-    categories: List[str]
-
-
-class RecommendInputs(BaseModel):
-    user_id: str = Field(alias='userId')
-    filters: RecommendFilters
-    onboarding: Optional[RecommendOnboarding] = Field(None)
-    return_variants: bool = Field(True)
 
 
 class RecommendTags(BaseModel):
@@ -65,6 +25,86 @@ class RecommendTags(BaseModel):
 
     class Config:
         allow_population_by_field_name = True
+
+
+class IdentifyInputs(BaseModel):
+    first_name: Optional[str] = Field(None, alias='firstName')
+    middle_name: Optional[str] = Field(None, alias='middleName')
+    last_name: Optional[str] = Field(None, alias='lastName')
+    date_of_birth: Optional[dt.date] = Field(None, alias='dateOfBirth')
+    user_id: Optional[str] = Field(None, alias='userId')
+
+
+class HistoryVariant(BaseModel):
+    id: str
+    area: List[str]
+    visited_at: dt.datetime = Field(alias='visitedAt')
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class HistoryItem(BaseModel):
+    id: str
+    category1: str
+    category2: str
+    category3: str
+    description: str
+    variant: HistoryVariant
+
+
+
+class IdentifyOutputs(BaseModel):
+    first_name: Optional[str] = Field(None, alias='firstName')
+    middle_name: Optional[str] = Field(None, alias='middleName')
+    last_name: Optional[str] = Field(None, alias='lastName')
+    date_of_birth: Optional[dt.date] = Field(None, alias='dateOfBirth')
+    need_onboarding: bool = Field(alias='needOnboarding')
+    user_id: str = Field(alias='userId')
+    areas: List[str] = Field(alias='areas')
+    history: List[HistoryItem]
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class RecommendCategories(BaseModel):
+    soul: bool
+    mind: bool
+    body: bool
+
+
+class RecommendFilterDays(BaseModel):
+    mon: bool = True
+    tue: bool = True
+    wed: bool = True
+    thu: bool = True
+    fri: bool = True
+    sat: bool = True
+    sun: bool = True
+
+
+class RecommendFilters(BaseModel):
+    query: str = Field()
+    health_problems: bool = Field(alias='healthProblems')
+    prefer_online: bool = Field(alias='preferOnline')
+    with_grandson: bool = Field(alias='withGrandson')
+    categories: RecommendCategories
+    areas: Set[str]
+    friend_ids: Set[str] = Field(alias='friendIds')
+    days: RecommendFilterDays = Field(default_factory=RecommendFilterDays)
+
+
+class RecommendOnboarding(BaseModel):
+    categories: List[str]
+
+
+class RecommendInputs(BaseModel):
+    user_id: str = Field(alias='userId')
+    filters: RecommendFilters
+    onboarding: Optional[RecommendOnboarding] = Field(None)
+    return_variants: bool = Field(True)
+    ratings: Dict[str, Literal['liked'] | Literal['disliked']] = Field(default_factory=dict)
 
 
 class RecommendTimetable(BaseModel):
@@ -133,7 +173,25 @@ GRANDSON_CATEGORIES = {'ОНЛАЙН Рисование', 'ОНЛАЙН Англ
                        'Художественно-прикладное творчество'}
 
 
+def load_full_attendance():
+    attendance = pd.read_csv('data/attend.csv', dtype={
+        'уникальный номер занятия': str,
+        'уникальный номер группы': str,
+        'уникальный номер участника': str,
+        'дата занятия': str,
+        'время начала занятия': str,
+        'время окончания занятия': str
+    })
+    tqdm.pandas()
+    attendance['dt'] = attendance.progress_apply(
+        lambda x: dt.datetime.fromisoformat(f'{x["дата занятия"]}T{x["время начала занятия"]}'), axis=1)
+    attendance = attendance[['уникальный номер группы', 'уникальный номер участника', 'dt']]
+    attendance = attendance.groupby('уникальный номер участника').apply(lambda x: x.drop(columns=['уникальный номер участника']).to_dict(orient='records')).to_dict()
+    return attendance
+
+
 def create_app():
+    history = load_full_attendance()
     user_bank = UserBank('data/users.csv', 'data/user_names.csv')
     group_bank = GroupBank('data/groups.csv')
     with open('data/attendance.pkl', 'rb') as f:
@@ -150,11 +208,48 @@ def create_app():
 
     @app.post('/identify')
     async def identify(inputs: IdentifyInputs) -> IdentifyOutputs:
-        uid = user_bank.get_user_id_by_name(inputs.date_of_birth, inputs.first_name, inputs.middle_name, inputs.last_name)
+        if inputs.user_id is None:
+            uid = user_bank.get_user_id_by_name(inputs.date_of_birth, inputs.first_name, inputs.middle_name, inputs.last_name)
+            if uid is not None:
+                first, middle, last, dow = inputs.first_name, inputs.middle_name, inputs.last_name, inputs.date_of_birth
+            else:
+                first = middle = last = ''
+                dow = dt.date(1970, 1, 1)
+        else:
+            uid = inputs.user_id
+            ident = user_bank.get_user_identity_by_id(uid)
+            first, middle, last, dow = ident['first'], ident['middle'], ident['last'], ident['дата рождения']
+        user_hist = history.get(uid, None)
+        hist = []
+        if user_hist is not None:
+            for itm in user_hist:
+                try:
+                    group_id = itm['уникальный номер группы']
+                    timestamp = itm['dt'].to_pydatetime()
+                    macro_id = group_bank.get_macro_group_id(group_id)
+                    group_blocks = all_blocks[macro_id]
+                    group_actions = all_actions[0][macro_id], all_actions[1][macro_id], all_actions[2][macro_id]
+                    group_description = all_descriptions[macro_id]
+                    hist.append(HistoryItem(
+                        id=str(hash(group_actions)),
+                        category1=group_actions[0],
+                        category2=group_actions[1],
+                        category3=group_actions[2],
+                        description=group_description,
+                        variant=HistoryVariant(id=str(group_id), area=list(group_blocks), visited_at=timestamp)
+                    ))
+                except:
+                    traceback.print_exc()
+        hist = sorted(hist, key=lambda x: x.variant.visited_at)
         return IdentifyOutputs(
             areas=group_bank.get_all_blocks(),
             user_id='demo' if uid is None else uid,
-            need_onboarding=uid is None
+            need_onboarding=uid is None,
+            history=hist,
+            first_name=first,
+            middle_name=middle,
+            last_name=last,
+            date_of_birth=dow
         )
 
     all_actions = group_bank.get_action_by_ids(list(range(group_bank.num_macro_groups)))
@@ -174,7 +269,6 @@ def create_app():
     ]) for block in all_block_set}
     all_search_str = [' '.join(x.strip() for x in zippd).lower() for zippd in zip(*all_actions, all_descriptions)]
     today_timetables = {k: group_bank.get_timetable(k, dt.date(2023, 4, 10)) for k in group_bank.get_all_group_ids()}
-    print(123)
 
     @app.post('/recommend')
     async def recommend(inputs: RecommendInputs) -> RecommendOutputs:
@@ -231,15 +325,30 @@ def create_app():
             group_macrocat = all_threecatts[macro_group_index]
             group_online = all_onlines[macro_group_index]
             group_description = all_descriptions[macro_group_index]
-            group_near = False
-            group_small = False
-            group_new = False
             groups_with_timetables = {k: RecommendTimetable.parse_obj(today_timetables[k]) for k in group_bank.get_group(macro_group_index) if today_timetables[k] is not None}
             groups_distances = {k: (geopy.distance.distance(user_geo, group_bank.get_geocoord(k)).meters if (user_geo is not None and not group_online) else 0) for k in groups_with_timetables.keys()}
             variants = [RecommendVariant(id=idx, timetable=tt, area=list(group_blocks), distance=groups_distances[idx]) for idx, tt in groups_with_timetables.items()]
+
+            def filter_variant(variant: RecommendVariant, days: RecommendFilterDays):
+                day_pairs = [
+                    (days.mon, variant.timetable.mon),
+                    (days.tue, variant.timetable.tue),
+                    (days.wed, variant.timetable.wed),
+                    (days.thu, variant.timetable.thu),
+                    (days.fri, variant.timetable.fri),
+                    (days.sat, variant.timetable.sat),
+                    (days.sun, variant.timetable.sun),
+                ]
+                for pair in day_pairs:
+                    if pair[0] and (pair[1] != 'нет'):  # если чел может и в расписании есть день, то ок
+                        return True
+                return False
+
+            variants = [x for x in variants if filter_variant(x, inputs.filters.days)]
             variants = sorted(variants, key=lambda x: (x.distance, x.timetable.mon, x.timetable.tue, x.timetable.wed, x.timetable.thu, x.timetable.fri, x.timetable.sat, x.timetable.sun))
             if len(variants) == 0:
                 continue
+
             if group_actions not in mega_items:
                 mega_items[group_actions] = {
                     'id': str(hash(group_actions)),
@@ -247,9 +356,13 @@ def create_app():
                     'category2': group_actions[1],
                     'category3': group_actions[2],
                     'description': group_description,
-                    'tags': RecommendTags(category=group_macrocat, small_groups=group_small, next_house=group_near, new=group_new,
+                    'tags': RecommendTags(category=group_macrocat, small_groups=False, next_house=False, new=False,
                                           online=group_online)
                 }
+            if not group_online:
+                min_distance = min(map(lambda x: x.distance, variants))
+                if min_distance <= 350:
+                    mega_items[group_actions]['tags'].next_house = True
             mega_group_variants[group_actions].extend(variants)
 
         if user_demo_mode:
